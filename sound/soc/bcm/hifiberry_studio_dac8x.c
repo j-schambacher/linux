@@ -16,6 +16,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  */
+#define DEBUG
 
 #include <linux/module.h>
 #include <linux/i2c.h>
@@ -28,6 +29,11 @@
 #include <sound/tlv.h>
 #include <linux/uuid.h>
 #include <linux/slab.h>
+#include <linux/gpio.h>
+#include <linux/interrupt.h>
+#include <linux/of_gpio.h>
+#include <linux/of_irq.h>
+#include <linux/irq.h>
 
 /* register definitions and firmware settings */
 #define FIRMWARE_MAJOR			0x00
@@ -60,6 +66,8 @@
 #define CARD_NOERR			0x34
 #define CARD_CLK_OPTIONS		0x35
 #define CARD_CLOCK_MODE			0x36
+#define CARD_CLK_ACT			0x37
+#define CARD_CLK_OVRRD			0x38
 #define DAC_STATE			0x40
 #define DAC_CLOCK_SOURCE		0x41
 #define DAC_SYS_CLK			0x42
@@ -150,7 +158,9 @@ struct hb_studio_dac8x_regs_t {
 	unsigned char card_noerr;		// 0x34
 	unsigned char card_clk_options;		// 0x35
 	unsigned char card_clk_mode;		// 0x36
-	unsigned char res3[9];			// 0x37
+	unsigned char card_clk_act;		// 0x37
+	unsigned char card_clk_ovrrd;		// 0x39
+	unsigned char res3[7];			// 0x37
 	unsigned char dac_state;		// 0x40
 	unsigned char dac_clock_source;		// 0x41
 	unsigned char dac_sys_clk;		// 0x42
@@ -217,6 +227,7 @@ static bool hb_uni_volatile_reg(struct device *dev, unsigned int reg)
 	case DAC_STATE:
 	case DAC_CLOCK_SOURCE:
 	case DAC_SYS_CLK:
+	case CARD_CLK_ACT:
 	case MASTER_VOL:
 	case VOL_CH0:
 	case VOL_CH1:
@@ -264,6 +275,7 @@ static bool hb_uni_readable_reg(struct device *dev, unsigned int reg)
 	case CARD_BUSY:
 	case CARD_RESET:
 	case CARD_CLOCK_MODE:
+	case CARD_CLK_ACT:
 	case DAC_CLOCK_SOURCE:
 	case DAC_SYS_CLK:
 	case DAC_SAMPLE_FORMAT:
@@ -846,12 +858,15 @@ static int hb_controller_probe(struct platform_device *pdev)
 
 	if (!adap)
 		return -EPROBE_DEFER;   /* I2C module not yet available */
-
+#if DEBUG
 	struct i2c_board_info info = {
 		I2C_BOARD_INFO("hb_controller", 0x10),
 	};
 
 	hb_uni_i2c_client = i2c_new_client_device(adap, &info);
+#else
+	hb_uni_i2c_client = i2c_new_dummy_device(adap, 0x10);
+#endif
 	if (IS_ERR(hb_uni_i2c_client))
 		return PTR_ERR(hb_uni_i2c_client);
 
@@ -876,14 +891,52 @@ static int hb_controller_probe(struct platform_device *pdev)
 	return ret;
 };
 
+static irqreturn_t my_gpio_irq_handler(int irq, void *dev_id)
+{
+//    struct my_audio_priv *priv = dev_id;
+
+    // Example: Toggle a flag or schedule work
+//    priv->gpio_triggered = true;
+    printk(KERN_ALERT "interrupt!\n");
+    // Or wake up a waitqueue / schedule a work item
+    // wake_up_interruptible(&priv->wq);
+
+    return IRQ_HANDLED;
+}
+
 static int snd_rpi_hifiberry_studio_dac8x_probe(struct platform_device *pdev)
 {
+	int gpio, irq;
 	int ret = 0;
 
 	/* probe for controller */
 	ret = hb_controller_probe(pdev);
 	if (ret < 0)
 		return ret;
+
+	dev_info(&pdev->dev, "GPIO checking .. \n");
+	gpio = of_get_named_gpio(pdev->dev.of_node, "gpios", 0);
+	if (!gpio_is_valid(gpio))
+		return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
+
+	ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "my_gpio_irq");
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to request GPIO\n");
+
+	irq = gpio_to_irq(gpio);
+	if (irq < 0)
+		return irq;
+
+	ret = devm_request_threaded_irq(&pdev->dev, irq,
+				    my_gpio_irq_handler, NULL,
+				    IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+				    "my_gpio_irq", NULL);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
+
+
+	dev_info(&pdev->dev, "GPIO interrupt registered on GPIO %d (IRQ %d)\n",
+		 gpio, irq);
 
 	snd_rpi_hifiberry_studio_dac8x.dev = &pdev->dev;
 
