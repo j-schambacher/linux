@@ -465,33 +465,48 @@ static int hb_uni_enum_put(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+/*
+ * Read the AES input rate from the DIR FS calculator (reg 0x3A).  Triggers a
+ * fresh measurement, waits for PFSST (bit7) to settle, decodes the PFSOUT code.
+ * Returns the rate in Hz, or 0 if no valid input is present.  Passive: works in
+ * any clock mode (XTI/TX or DIR/RX).
+ */
+static int hb_dir_input_rate_hz(struct hb_uni_private *p)
+{
+	unsigned int raw = 0;
+	int trials = 5;
+
+	regmap_write(p->regmap, CARD_DIR_FS, 0x00);
+	do {
+		usleep_range(1000, 2000);
+		regmap_read(p->regmap, CARD_DIR_FS, &raw);
+	} while ((raw & 0x80) && --trials);
+
+	switch (raw & 0x0f) {
+	case 0x08: return 44100;
+	case 0x09: return 48000;
+	case 0x0b: return 88200;
+	case 0x0c: return 96000;
+	case 0x0e: return 176400;
+	case 0x0f: return 192000;
+	default:   return 0;
+	}
+}
+
 static int hb_uni_samplerate_get(struct snd_kcontrol *kcontrol,
 				 struct snd_ctl_elem_value *ucontrol)
 {
 	struct hb_uni_enum_control *ctl = (void *)kcontrol->private_value;
-	unsigned int raw = 0, idx;
-	int trials = 5;
+	unsigned int idx;
 
-	/*
-	 * Report the real input rate from the DIR FS calculator (reg 0x3A)
-	 * rather than the locked/active clock (0x37), which stays 0xff in
-	 * TX provider/XTI mode.  A write triggers a fresh measurement; bit7
-	 * (PFSST) is set while measuring, the low nibble is the PFSOUT code.
-	 */
-	regmap_write(priv->regmap, ctl->reg, 0x00);
-	do {
-		usleep_range(1000, 2000);
-		regmap_read(priv->regmap, ctl->reg, &raw);
-	} while ((raw & 0x80) && --trials);
-
-	switch (raw & 0x0f) {
-	case 0x08: idx = 6;  break;	/* 44.1 kHz */
-	case 0x09: idx = 7;  break;	/* 48 kHz   */
-	case 0x0b: idx = 9;  break;	/* 88.2 kHz */
-	case 0x0c: idx = 10; break;	/* 96 kHz   */
-	case 0x0e: idx = 11; break;	/* 176.4 kHz */
-	case 0x0f: idx = 12; break;	/* 192 kHz  */
-	default:   idx = ctl->items - 1; break;	/* na */
+	switch (hb_dir_input_rate_hz(priv)) {
+	case 44100:  idx = 6;  break;
+	case 48000:  idx = 7;  break;
+	case 88200:  idx = 9;  break;
+	case 96000:  idx = 10; break;
+	case 176400: idx = 11; break;
+	case 192000: idx = 12; break;
+	default:     idx = ctl->items - 1; break;	/* na */
 	}
 
 	ucontrol->value.enumerated.item[0] = idx;
@@ -686,15 +701,42 @@ static int snd_rpi_hifiberry_studio_dac8x_hw_params(
 		return -EINVAL;
 	}
 
-	if (priv->card_type == AES &&
-	    regmap_read(priv->regmap, CARD_CLK_OVRWR, &priv->clk_ovrwr)) {
-		regmap_read(priv->regmap, CARD_CLK_ACT, &priv->allowed_rate);
-		if ((priv->allowed_rate != priv->current_rate) &&
-			(priv->allowed_rate != 0xff)) {
-			if (tmp != priv->allowed_rate) {
-				dev_info(dev, "rate not supported (%u)\n",
-					 priv->current_rate);
+	/*
+	 * AES clock selection & rate locking (see clock-selection-io.md):
+	 *  - capture forces DIR/RX, but only for a fully valid request (an input
+	 *    is present AND the requested rate matches it); otherwise reject and
+	 *    leave the clock mode unchanged;
+	 *  - in DIR/RX mode every stream (capture or playback) must run at the
+	 *    detected AES input rate;
+	 *  - XTI/TX playback is unconstrained (the card is the clock master).
+	 */
+	if (priv->card_type == AES) {
+		bool capture = (substream->stream == SNDRV_PCM_STREAM_CAPTURE);
+		unsigned int mode = 0;
+		int in_rate;
+
+		if (capture) {
+			in_rate = hb_dir_input_rate_hz(priv);
+			if (!in_rate) {
+				dev_err(dev, "no AES input detected, cannot capture\n");
 				return -EINVAL;
+			}
+			if (in_rate != (int)priv->current_rate) {
+				dev_err(dev, "capture rate %u does not match AES input %d Hz\n",
+					priv->current_rate, in_rate);
+				return -EINVAL;
+			}
+			/* valid input and matching rate: lock the card to the input */
+			regmap_write(priv->regmap, CARD_CLK_OVRWR, 0x01);
+		} else {
+			regmap_read(priv->regmap, CARD_CLK_OVRWR, &mode);
+			if (mode == 0x01) {
+				in_rate = hb_dir_input_rate_hz(priv);
+				if (!in_rate || in_rate != (int)priv->current_rate) {
+					dev_err(dev, "playback rate %u does not match AES input %d Hz\n",
+						priv->current_rate, in_rate);
+					return -EINVAL;
+				}
 			}
 		}
 	}
