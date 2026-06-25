@@ -16,6 +16,7 @@
  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
  * General Public License for more details.
  */
+#define DEBUG
 
 #include <linux/module.h>
 #include <linux/i2c.h>
@@ -28,6 +29,11 @@
 #include <sound/tlv.h>
 #include <linux/uuid.h>
 #include <linux/slab.h>
+#include <linux/gpio.h>
+#include <linux/interrupt.h>
+#include <linux/of_gpio.h>
+#include <linux/of_irq.h>
+#include <linux/irq.h>
 
 /* register definitions and firmware settings */
 #define FIRMWARE_MAJOR			0x00
@@ -60,6 +66,9 @@
 #define CARD_NOERR			0x34
 #define CARD_CLK_OPTIONS		0x35
 #define CARD_CLOCK_MODE			0x36
+#define CARD_CLK_ACT			0x37
+#define CARD_CLK_OVRWR			0x38
+#define CARD_STREAM_STATUS		0x39
 #define DAC_STATE			0x40
 #define DAC_CLOCK_SOURCE		0x41
 #define DAC_SYS_CLK			0x42
@@ -123,6 +132,15 @@
 #define MASK_24_BIT_SF			0x02
 #define MASK_32_BIT_SF			0x03
 
+/* Card types */
+#define DACADC				0x00
+#define AES				0x01
+#define AMP				0x02
+
+/* Stream status */
+#define CAPTURE				0x01
+#define PLAY				0x10
+
 /* struct definition for easier access to firmware registers */
 struct hb_studio_dac8x_regs_t {
 	unsigned char firmware_major;
@@ -150,7 +168,10 @@ struct hb_studio_dac8x_regs_t {
 	unsigned char card_noerr;		// 0x34
 	unsigned char card_clk_options;		// 0x35
 	unsigned char card_clk_mode;		// 0x36
-	unsigned char res3[9];			// 0x37
+	unsigned char card_clk_act;		// 0x37
+	unsigned char card_clk_ovrwr;		// 0x38
+	unsigned char card_stream_status;	// 0x39
+	unsigned char res3[6];			// 0x3a
 	unsigned char dac_state;		// 0x40
 	unsigned char dac_clock_source;		// 0x41
 	unsigned char dac_sys_clk;		// 0x42
@@ -203,7 +224,15 @@ struct hb_uni_private {
 	uuid_t uuid;
 	unsigned int sample_bits;
 	unsigned int current_rate;
+	unsigned int allowed_rate;
+	unsigned int clk_ovrwr;
 	struct hb_studio_dac8x_regs_t card_info;
+	struct snd_pcm_substream *playback_substream;
+	struct snd_pcm_substream *capture_substream;
+	spinlock_t stream_lock;
+	struct work_struct error_work;
+	const char * type;
+	int card_type;
 };
 
 static struct hb_uni_private *priv;
@@ -217,6 +246,7 @@ static bool hb_uni_volatile_reg(struct device *dev, unsigned int reg)
 	case DAC_STATE:
 	case DAC_CLOCK_SOURCE:
 	case DAC_SYS_CLK:
+	case CARD_CLK_ACT:
 	case MASTER_VOL:
 	case VOL_CH0:
 	case VOL_CH1:
@@ -264,6 +294,7 @@ static bool hb_uni_readable_reg(struct device *dev, unsigned int reg)
 	case CARD_BUSY:
 	case CARD_RESET:
 	case CARD_CLOCK_MODE:
+	case CARD_CLK_ACT:
 	case DAC_CLOCK_SOURCE:
 	case DAC_SYS_CLK:
 	case DAC_SAMPLE_FORMAT:
@@ -311,6 +342,7 @@ static const char * const dac_filter_texts[] = {
 static const char * const adc_att_texts[] = {
 	"Clip att. off", "-3dB", "-4dB", "-5dB", "-6dB",
 	};
+static const char * const dix_clk_texts[] = {"TX", "RX"};
 
 struct hb_uni_vol_control_single {
 	unsigned int reg;
@@ -319,6 +351,14 @@ struct hb_uni_vol_control_single {
 	int max;
 	bool invert;
 	const unsigned int *tlv;
+};
+
+/* Add this to the enum control definitions */
+static const char * const samplerate_texts[] = {
+    "5512Hz", "8kHz", "11.025kHz", "16kHz",
+    "22.050kHz", "32kHz", "44.1kHz", "48kHz", "64kHz",
+    "88.2kHz", "96kHz", "176.4Hz", "192kHz", "352.8kHz", "384kHz",
+    "na"
 };
 
 static int hb_uni_vol_info_single(struct snd_kcontrol *kcontrol,
@@ -503,15 +543,35 @@ static const struct hb_uni_enum_control hb_uni_play_enum_ctls[] = {
 
 static const struct hb_uni_enum_control hb_uni_rec_enum_ctls[] = {
 	{ ADC_CLIPPING_ATT, 0, 0x7, adc_att_texts, ARRAY_SIZE(adc_att_texts) },
+	{ MUTE_INPUTS, 0, 0x01, mute_texts, ARRAY_SIZE(mute_texts) },
+};
+
+static const struct hb_uni_enum_control hb_uni_dix_clk_enum_ctls[] = {
+	{ CARD_CLK_OVRWR, 0, 0x01, dix_clk_texts, ARRAY_SIZE(dix_clk_texts) },
 };
 
 static const struct snd_kcontrol_new hb_uni_gen_controls_single[] = {
 	ENUM_CTL_SINGLE("DAC Filter", hb_uni_play_enum_ctls[1]),
-	ENUM_CTL_SINGLE("DAC Mute", hb_uni_play_enum_ctls[2]),
+	ENUM_CTL_SINGLE("Output Mute", hb_uni_play_enum_ctls[2]),
 };
 
 static const struct snd_kcontrol_new adc_controls_single[] = {
 	ENUM_CTL_SINGLE("Clipping Attenuation Capture Volume", hb_uni_rec_enum_ctls[0]),
+};
+
+static const struct hb_uni_enum_control hb_uni_samplerate_ctl = {
+    .reg = CARD_CLK_ACT,  // This register holds the current rate
+    .shift = 0,
+    .mask = 0x0F,         // Rate is stored in lower 4 bits
+    .texts = samplerate_texts,
+    .items = ARRAY_SIZE(samplerate_texts),
+};
+
+static const struct snd_kcontrol_new dix_controls_single[] = {
+	ENUM_CTL_SINGLE("Clock mode", hb_uni_dix_clk_enum_ctls[0]),
+	ENUM_CTL_SINGLE("Output Mute", hb_uni_play_enum_ctls[2]),
+	ENUM_CTL_SINGLE("Input Mute", hb_uni_rec_enum_ctls[1]),
+	ENUM_CTL_SINGLE_RO("Current Sample Rate", hb_uni_samplerate_ctl),
 };
 
 static int snd_rpi_hifiberry_studio_dac8x_hw_params(
@@ -528,9 +588,9 @@ static int snd_rpi_hifiberry_studio_dac8x_hw_params(
 
 	priv->sample_bits = snd_pcm_format_width(params_format(params));
 	priv->sample_bits = priv->sample_bits <= 16 ? 16 : 32;
-
 	priv->current_rate = params_rate(params);
-	dev_info(dev, "using %ibits @ %isps\n",
+
+	dev_info(dev, "requesting %ibits @ %isps\n",
 		priv->sample_bits, priv->current_rate);
 
 	/* write requested samplerate and word length back to card */
@@ -582,6 +642,19 @@ static int snd_rpi_hifiberry_studio_dac8x_hw_params(
 		return -EINVAL;
 	}
 
+	if (priv->card_type == AES &&
+	    regmap_read(priv->regmap, CARD_CLK_OVRWR, &priv->clk_ovrwr)) {
+		regmap_read(priv->regmap, CARD_CLK_ACT, &priv->allowed_rate);
+		if ((priv->allowed_rate != priv->current_rate) &&
+			(priv->allowed_rate != 0xff)) {
+			if (tmp != priv->allowed_rate) {
+				dev_info(dev, "rate not supported (%u)\n",
+					 priv->current_rate);
+				return -EINVAL;
+			}
+		}
+	}
+
 	err = regmap_write(priv->regmap, CURRENT_RATE, tmp);
 	if (err < 0)
 		return err;
@@ -607,7 +680,7 @@ static int snd_rpi_hifiberry_studio_dac8x_hw_params(
 
 	/* If card provides clocks wait max. ~40ms for PLL */
 	if (card_is_clk_provider) {
-	/* trigger card to set new rate and format */
+		/* trigger card to set new rate and format */
 		err = regmap_write(priv->regmap, CARD_CLOCK_MODE, 0x02);
 		if (err < 0)
 			return err;
@@ -624,15 +697,49 @@ static int snd_rpi_hifiberry_studio_dac8x_hw_params(
 	/* always run with 64bit frames */
 	return snd_soc_dai_set_bclk_ratio(cpu_dai, 64);
 }
+static int snd_rpi_hifiberry_studio_dac8x_startup(
+	struct snd_pcm_substream *substream)
+{
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		priv->playback_substream = substream;
+		regmap_update_bits(priv->regmap, CARD_STREAM_STATUS, 0x10,
+				   0x10);
+	} else {
+		priv->capture_substream = substream;
+		regmap_update_bits(priv->regmap, CARD_STREAM_STATUS, 0x01,
+				   0x01);
+	}
+
+	return 0;
+}
+
+static void snd_rpi_hifiberry_studio_dac8x_shutdown(
+	struct snd_pcm_substream *substream)
+{
+	if (substream->stream == SNDRV_PCM_STREAM_PLAYBACK) {
+		regmap_update_bits(priv->regmap, CARD_STREAM_STATUS, 0x10,
+				   0x00);
+		priv->playback_substream = NULL;
+	} else {
+		regmap_update_bits(priv->regmap, CARD_STREAM_STATUS, 0x01,
+				   0x00);
+		priv->capture_substream = NULL;
+	}
+}
 
 static const struct snd_soc_ops snd_rpi_hifiberry_studio_dac8x_ops = {
+	.startup   = snd_rpi_hifiberry_studio_dac8x_startup,
 	.hw_params = snd_rpi_hifiberry_studio_dac8x_hw_params,
+	.shutdown  = snd_rpi_hifiberry_studio_dac8x_shutdown,
 };
 
 SND_SOC_DAILINK_DEFS(hifiberry_studio_dac8x,
 	DAILINK_COMP_ARRAY(COMP_EMPTY()),
 	DAILINK_COMP_ARRAY(COMP_CODEC("snd-soc-dummy", "snd-soc-dummy-dai")),
 	DAILINK_COMP_ARRAY(COMP_EMPTY()));
+
+static void hb_uni_error_work(struct work_struct *work);
+
 
 static int hifiberry_studio_dac8x_init(struct snd_soc_pcm_runtime *rtd)
 {
@@ -657,7 +764,7 @@ static int hifiberry_studio_dac8x_init(struct snd_soc_pcm_runtime *rtd)
 			priv->card_info.supported_rates;
 		codec_dai->driver->capture.channels_max =
 			priv->card_info.num_of_input_ch;
-		dai->name = "HiFiBerry Studio DAC8x-ADC8x";
+//		dai->name = "HiFiBerry Studio DAC8x-ADC8x";
 		dai->stream_name = "HiFiBerry Studio HiFi";
 	} else {
 		rtd->dai_link->playback_only = 1;  // Disable capture
@@ -671,14 +778,16 @@ static int hifiberry_studio_dac8x_init(struct snd_soc_pcm_runtime *rtd)
 			| SND_SOC_DAIFMT_CBP_CFP;
 	}
 	dev_info(card->dev,
-		 "HiFiBerry Studio DAC8x successfully initialized\n");
+		 "HiFiBerry Studio Soundcard successfully initialized\n");
 
+	spin_lock_init(&priv->stream_lock);
+	INIT_WORK(&priv->error_work, hb_uni_error_work);
 	return 0;
 }
 
 static struct snd_soc_dai_link snd_rpi_hifiberry_studio_dac8x_dai[] = {
 	{
-		.name           = "HiFiBerry Studio DAC8x",
+		.name           = "HiFiBerry Studio Soundcard",
 		.stream_name    = "HifiBerry Studio HiFi",
 		.dai_fmt        = SND_SOC_DAIFMT_I2S |
 					SND_SOC_DAIFMT_NB_NF |
@@ -691,7 +800,7 @@ static struct snd_soc_dai_link snd_rpi_hifiberry_studio_dac8x_dai[] = {
 
 /* audio machine driver */
 static struct snd_soc_card snd_rpi_hifiberry_studio_dac8x = {
-	.name         = "Hifiberry Studio DAC8x",
+	.name         = "Hifiberry Studio Soundcard",
 	.driver_name  = "HifiberryStudio",
 	.owner        = THIS_MODULE,
 	.dai_link     = snd_rpi_hifiberry_studio_dac8x_dai,
@@ -767,23 +876,36 @@ static int hb_uni_read_card_info(struct platform_device *pdev)
 			return -EINVAL;
 		}
 	} else {
-		if (priv->card_info.card_clk_options == 0x02) {
+		if ((priv->card_info.card_clk_options == 0x02)) {
 			dev_err(&pdev->dev,
 				"Card cannot run as i2s clock consumer\n");
 			return -EINVAL;
 		}
 	}
 
-	switch (cpu_to_be32(*(unsigned int *)&priv->card_info.uuid)) {
-	case 0x74e7ae95:
-		if (card_is_clk_provider)
-			snd_rpi_hifiberry_studio_dac8x.name =
-						"HiFiBerry Studio DAC8x Pro";
-		else
-			snd_rpi_hifiberry_studio_dac8x.name =
-						"HiFiBerry Studio DAC8x";
+	ret = of_property_read_string(pdev->dev.of_node,
+			      "card-type", &priv->type);
+	if (ret)
+		dev_warn(&pdev->dev, "No card type specified, using default\n");
+	else
+		dev_info(&pdev->dev, "Card type %s\n", priv->type);
+
+#define _uuid_ 	cpu_to_be32(*(unsigned int *)((uint8_t *)&priv->card_info.uuid + 12))
+
+	dev_info(&pdev->dev, "Card UUID end %x08\n", _uuid_);
+
+	switch (_uuid_) {
+	case 0x7c641980:
+		dev_info(&pdev->dev, "Card type Analog\n");
+		priv->card_type = DACADC;
+		break;
+	case 0x0eb0104d:
+		dev_info(&pdev->dev, "Card type Digital/AES\n");
+		priv->card_type = AES;
 		break;
 	default:
+		dev_info(&pdev->dev, "No card type detected, assuming Analog \n");
+		priv->card_type = DACADC;
 		break;
 	}
 
@@ -800,37 +922,49 @@ static int hb_uni_add_card_controls(struct platform_device *pdev)
 {
 	int ret;
 
-	ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+	/* add controls if analog cards */
+	if (priv->card_type == DACADC) {
+		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
 			hb_uni_gen_controls_single,
 			ARRAY_SIZE(hb_uni_gen_controls_single));
-	if (ret < 0) {
-		dev_err(&pdev->dev,
-			"snd_soc_add_card_controls() failed: %d\n", ret);
-		return ret;
-	}
-	ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-			hb_uni_play_controls_single,
-			ARRAY_SIZE(hb_uni_play_controls_single) / 9 *
-					(priv->card_info.num_of_output_ch + 1));
-	if (ret < 0) {
-		dev_err(&pdev->dev,
-			"snd_soc_add_card_controls() failed: %d\n", ret);
-		return ret;
-	}
-
-	/* add optional ADC controls if inputs detected */
-	if (priv->card_info.num_of_input_ch > 0) {
-		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-			hb_uni_rec_controls_single,
-			ARRAY_SIZE(hb_uni_rec_controls_single) / 8 *
-					priv->card_info.num_of_input_ch);
 		if (ret < 0) {
 			dev_err(&pdev->dev,
 				"snd_soc_add_card_controls() failed: %d\n", ret);
+			return ret;
 		}
 		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-			adc_controls_single,
-			ARRAY_SIZE(adc_controls_single));
+				hb_uni_play_controls_single,
+				ARRAY_SIZE(hb_uni_play_controls_single) / 9 *
+						(priv->card_info.num_of_output_ch + 1));
+		if (ret < 0) {
+			dev_err(&pdev->dev,
+				"snd_soc_add_card_controls() failed: %d\n", ret);
+			return ret;
+		}
+
+		/* add optional ADC controls if inputs detected */
+		if (priv->card_info.num_of_input_ch > 0) {
+			ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+				hb_uni_rec_controls_single,
+				ARRAY_SIZE(hb_uni_rec_controls_single) / 8 *
+						priv->card_info.num_of_input_ch);
+			if (ret < 0) {
+				dev_err(&pdev->dev,
+					"snd_soc_add_card_controls() failed: %d\n", ret);
+			}
+			ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+				adc_controls_single,
+				ARRAY_SIZE(adc_controls_single));
+			if (ret < 0) {
+				dev_err(&pdev->dev,
+					"snd_soc_add_card_controls() failed: %d\n", ret);
+			}
+		}
+	/* add DIX controls if AES card detected */
+	} else if (priv->card_type == AES) {
+		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+			dix_controls_single,
+			ARRAY_SIZE(dix_controls_single));
 		if (ret < 0) {
 			dev_err(&pdev->dev,
 				"snd_soc_add_card_controls() failed: %d\n", ret);
@@ -875,16 +1009,71 @@ static int hb_controller_probe(struct platform_device *pdev)
 	}
 
 	return ret;
-};
+}
+
+static void hb_uni_error_work(struct work_struct *work)
+{
+	struct hb_uni_private *p =
+	    container_of(work, struct hb_uni_private, error_work);
+	unsigned long flags;
+	struct snd_pcm_substream *play, *capt;
+
+	dev_err(&hb_uni_i2c_client->dev, "PLL lock lost, stopping streams\n");
+
+	spin_lock_irqsave(&p->stream_lock, flags);
+	play = p->playback_substream;
+	capt = p->capture_substream;
+
+	if (play)
+		snd_pcm_stop(play, SNDRV_PCM_STATE_SUSPENDED);
+	if (capt)
+		snd_pcm_stop(capt, SNDRV_PCM_STATE_SUSPENDED);
+	spin_unlock_irqrestore(&p->stream_lock, flags);
+}
+
+/* In your IRQ handler, just schedule the work: */
+static irqreturn_t hb_uni_irq_handler(int irq, void *dev_id)
+{
+	struct hb_uni_private *p = dev_id;
+
+	printk(KERN_ALERT "Interrupt!\n");
+	schedule_work(&p->error_work);
+	return IRQ_HANDLED;
+}
 
 static int snd_rpi_hifiberry_studio_dac8x_probe(struct platform_device *pdev)
 {
+	int gpio, irq;
 	int ret = 0;
 
 	/* probe for controller */
 	ret = hb_controller_probe(pdev);
 	if (ret < 0)
 		return ret;
+
+	dev_info(&pdev->dev, "GPIO checking .. \n");
+	gpio = of_get_named_gpio(pdev->dev.of_node, "gpios", 0);
+	if (!gpio_is_valid(gpio))
+		return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
+
+	ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "my_gpio_irq");
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to request GPIO\n");
+
+	irq = gpio_to_irq(gpio);
+	if (irq < 0)
+		return irq;
+
+	ret = devm_request_threaded_irq(&pdev->dev, irq,
+				    hb_uni_irq_handler, NULL,
+				    IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+				    "my_gpio_irq", priv);
+	if (ret)
+		return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
+
+
+	dev_info(&pdev->dev, "GPIO interrupt registered on GPIO %d (IRQ %d)\n",
+		 gpio, irq);
 
 	snd_rpi_hifiberry_studio_dac8x.dev = &pdev->dev;
 
@@ -934,5 +1123,5 @@ static struct platform_driver snd_rpi_hifiberry_studio_dac8x_driver = {
 module_platform_driver(snd_rpi_hifiberry_studio_dac8x_driver);
 
 MODULE_AUTHOR("Joerg Schambacher <joerg@hifiberry.com>");
-MODULE_DESCRIPTION("HiFiBerry Studio DAC8x Soundcard Driver");
+MODULE_DESCRIPTION("HiFiBerry Studio Soundcard Driver");
 MODULE_LICENSE("GPL");

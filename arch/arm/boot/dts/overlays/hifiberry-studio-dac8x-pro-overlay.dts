@@ -3,6 +3,10 @@
 /dts-v1/;
 /plugin/;
 
+#include <dt-bindings/gpio/gpio.h>
+#include <dt-bindings/interrupt-controller/irq.h>
+#include <dt-bindings/pinctrl/bcm2835.h>
+
 / {
 	compatible = "brcm,bcm2712";
 
@@ -23,6 +27,10 @@
 				       "gpio24", "gpio25", "gpio26",
 				       "gpio27";
 				bias-disable;
+			};
+			dac8x_int_pin: dac8x_int_pin {
+				pins = "gpio7";
+				bias-pull-up;
 			};
 		};
 	};
@@ -51,10 +59,15 @@
 		target = <&sound>;
 		__overlay__ {
 			compatible = "hifiberry,hifiberry-studio-dac8x";
+			card-type = "pro";
 			i2s-controller = <&i2s_clk_consumer>;
 			clk-provider;
+			pinctrl-names = "default";
+			pinctrl-0 = <&dac8x_int_pin>;
+			interrupt-parent = <&gpio>;
+			interrupts = <7 IRQ_TYPE_EDGE_BOTH>;
+			gpios = <&gpio 7 GPIO_ACTIVE_HIGH>;
 			status = "okay";
 		};
 	};
-
 };
