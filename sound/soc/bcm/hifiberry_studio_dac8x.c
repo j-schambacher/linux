@@ -360,7 +360,7 @@ struct hb_uni_vol_control_single {
 static const char * const samplerate_texts[] = {
     "5512Hz", "8kHz", "11.025kHz", "16kHz",
     "22.050kHz", "32kHz", "44.1kHz", "48kHz", "64kHz",
-    "88.2kHz", "96kHz", "176.4Hz", "192kHz", "352.8kHz", "384kHz",
+    "88.2kHz", "96kHz", "176.4kHz", "192kHz", "352.8kHz", "384kHz",
     "na"
 };
 
