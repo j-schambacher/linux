@@ -69,6 +69,7 @@
 #define CARD_CLK_ACT			0x37
 #define CARD_CLK_OVRWR			0x38
 #define CARD_STREAM_STATUS		0x39
+#define CARD_DIR_FS			0x3A
 #define DAC_STATE			0x40
 #define DAC_CLOCK_SOURCE		0x41
 #define DAC_SYS_CLK			0x42
@@ -247,6 +248,7 @@ static bool hb_uni_volatile_reg(struct device *dev, unsigned int reg)
 	case DAC_CLOCK_SOURCE:
 	case DAC_SYS_CLK:
 	case CARD_CLK_ACT:
+	case CARD_DIR_FS:
 	case MASTER_VOL:
 	case VOL_CH0:
 	case VOL_CH1:
@@ -295,6 +297,7 @@ static bool hb_uni_readable_reg(struct device *dev, unsigned int reg)
 	case CARD_RESET:
 	case CARD_CLOCK_MODE:
 	case CARD_CLK_ACT:
+	case CARD_DIR_FS:
 	case DAC_CLOCK_SOURCE:
 	case DAC_SYS_CLK:
 	case DAC_SAMPLE_FORMAT:
@@ -462,6 +465,39 @@ static int hb_uni_enum_put(struct snd_kcontrol *kcontrol,
 	return 0;
 }
 
+static int hb_uni_samplerate_get(struct snd_kcontrol *kcontrol,
+				 struct snd_ctl_elem_value *ucontrol)
+{
+	struct hb_uni_enum_control *ctl = (void *)kcontrol->private_value;
+	unsigned int raw = 0, idx;
+	int trials = 5;
+
+	/*
+	 * Report the real input rate from the DIR FS calculator (reg 0x3A)
+	 * rather than the locked/active clock (0x37), which stays 0xff in
+	 * TX provider/XTI mode.  A write triggers a fresh measurement; bit7
+	 * (PFSST) is set while measuring, the low nibble is the PFSOUT code.
+	 */
+	regmap_write(priv->regmap, ctl->reg, 0x00);
+	do {
+		usleep_range(1000, 2000);
+		regmap_read(priv->regmap, ctl->reg, &raw);
+	} while ((raw & 0x80) && --trials);
+
+	switch (raw & 0x0f) {
+	case 0x08: idx = 6;  break;	/* 44.1 kHz */
+	case 0x09: idx = 7;  break;	/* 48 kHz   */
+	case 0x0b: idx = 9;  break;	/* 88.2 kHz */
+	case 0x0c: idx = 10; break;	/* 96 kHz   */
+	case 0x0e: idx = 11; break;	/* 176.4 kHz */
+	case 0x0f: idx = 12; break;	/* 192 kHz  */
+	default:   idx = ctl->items - 1; break;	/* na */
+	}
+
+	ucontrol->value.enumerated.item[0] = idx;
+	return 0;
+}
+
 #define VOL_CTL_SINGLE(kname, controls, ktlv) {\
 	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, \
 	.name = kname, \
@@ -486,6 +522,14 @@ static int hb_uni_enum_put(struct snd_kcontrol *kcontrol,
 	.name = kname, \
 	.info = hb_uni_enum_info, \
 	.get  = hb_uni_enum_get, \
+	.put  = NULL, \
+	.private_value = (unsigned long)&controls, }
+
+#define ENUM_CTL_SINGLE_RO_GET(kname, controls, getfn) {\
+	.iface = SNDRV_CTL_ELEM_IFACE_MIXER, \
+	.name = kname, \
+	.info = hb_uni_enum_info, \
+	.get  = getfn, \
 	.put  = NULL, \
 	.private_value = (unsigned long)&controls, }
 
@@ -560,7 +604,7 @@ static const struct snd_kcontrol_new adc_controls_single[] = {
 };
 
 static const struct hb_uni_enum_control hb_uni_samplerate_ctl = {
-    .reg = CARD_CLK_ACT,  // This register holds the current rate
+    .reg = CARD_DIR_FS,   // DIR FS calculator (0x3A): real input rate, any clock mode
     .shift = 0,
     .mask = 0x0F,         // Rate is stored in lower 4 bits
     .texts = samplerate_texts,
@@ -571,7 +615,7 @@ static const struct snd_kcontrol_new dix_controls_single[] = {
 	ENUM_CTL_SINGLE("Clock mode", hb_uni_dix_clk_enum_ctls[0]),
 	ENUM_CTL_SINGLE("Output Mute", hb_uni_play_enum_ctls[2]),
 	ENUM_CTL_SINGLE("Input Mute", hb_uni_rec_enum_ctls[1]),
-	ENUM_CTL_SINGLE_RO("Current Sample Rate", hb_uni_samplerate_ctl),
+	ENUM_CTL_SINGLE_RO_GET("Current Sample Rate", hb_uni_samplerate_ctl, hb_uni_samplerate_get),
 };
 
 static int snd_rpi_hifiberry_studio_dac8x_hw_params(
