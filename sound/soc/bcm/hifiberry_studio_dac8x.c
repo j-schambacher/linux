@@ -1011,7 +1011,7 @@ static int hb_uni_read_card_info(struct platform_device *pdev)
  * output-channel count), and — if inputs are present — the ADC gains and the
  * clipping-attenuation control.
  */
-static int hb_add_dacadc_controls(struct platform_device *pdev)
+static int hb_uni_add_dacadc_controls(struct platform_device *pdev)
 {
 	int ret;
 
@@ -1058,7 +1058,7 @@ static int hb_add_dacadc_controls(struct platform_device *pdev)
  * Register the ALSA controls for a Studio Digi / AES card (card_type AES):
  * the DIX controls — Clock mode, Current Sample Rate, Input/Output Mute.
  */
-static int hb_add_dix_controls(struct platform_device *pdev)
+static int hb_uni_add_dix_controls(struct platform_device *pdev)
 {
 	int ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
 		dix_controls_single, ARRAY_SIZE(dix_controls_single));
@@ -1071,17 +1071,17 @@ static int hb_add_dix_controls(struct platform_device *pdev)
 /*
  * The DAC8x and Digi cards share one controller and this driver; the card
  * type is auto-detected from the controller UUID (hb_uni_read_card_info):
- *   DACADC -> DAC8x DAC/ADC controls (hb_add_dacadc_controls)
- *   AES    -> Digi DIX controls      (hb_add_dix_controls)
+ *   DACADC -> DAC8x DAC/ADC controls (hb_uni_add_dacadc_controls)
+ *   AES    -> Digi DIX controls      (hb_uni_add_dix_controls)
  * Any other/unknown type registers no extra card controls.
  */
 static int hb_uni_add_card_controls(struct platform_device *pdev)
 {
 	switch (priv->card_type) {
 	case DACADC:
-		return hb_add_dacadc_controls(pdev);
+		return hb_uni_add_dacadc_controls(pdev);
 	case AES:
-		return hb_add_dix_controls(pdev);
+		return hb_uni_add_dix_controls(pdev);
 	default:
 		return 0;
 	}
@@ -1097,7 +1097,7 @@ static int hb_controller_probe(struct platform_device *pdev)
 		return -EPROBE_DEFER;   /* I2C module not yet available */
 
 	struct i2c_board_info info = {
-		I2C_BOARD_INFO("hb_controller", 0x10),
+		I2C_BOARD_INFO("hb-studio-ctrl", 0x10),
 	};
 
 	hb_uni_i2c_client = i2c_new_client_device(adap, &info);
@@ -1145,12 +1145,11 @@ static void hb_uni_error_work(struct work_struct *work)
 	spin_unlock_irqrestore(&p->stream_lock, flags);
 }
 
-/* In your IRQ handler, just schedule the work: */
+/* FS-change / PLL-lost interrupt: hand off to the error work queue. */
 static irqreturn_t hb_uni_irq_handler(int irq, void *dev_id)
 {
 	struct hb_uni_private *p = dev_id;
 
-	printk(KERN_ALERT "Interrupt!\n");
 	schedule_work(&p->error_work);
 	return IRQ_HANDLED;
 }
@@ -1170,7 +1169,7 @@ static int snd_rpi_hifiberry_studio_dac8x_probe(struct platform_device *pdev)
 	if (!gpio_is_valid(gpio))
 		return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
 
-	ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "my_gpio_irq");
+	ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "hifiberry-studio-fs-change");
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to request GPIO\n");
 
@@ -1181,7 +1180,7 @@ static int snd_rpi_hifiberry_studio_dac8x_probe(struct platform_device *pdev)
 	ret = devm_request_threaded_irq(&pdev->dev, irq,
 				    hb_uni_irq_handler, NULL,
 				    IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
-				    "my_gpio_irq", priv);
+				    "hifiberry-studio-fs-change", priv);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
 
