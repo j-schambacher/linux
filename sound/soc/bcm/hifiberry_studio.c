@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0
 /*
- * hifiberry_studio_dac8x.c -- driver for more complex
+ * hifiberry_studio.c -- driver for more complex
  * multichannel soundcards with own onboard firmware.
  *
  * Copyright (C) 2026 HiFiBerry
@@ -1226,7 +1226,7 @@ MODULE_DEVICE_TABLE(of, snd_rpi_hifiberry_studio_of_match);
 
 static struct platform_driver snd_rpi_hifiberry_studio_driver = {
 	.driver = {
-		.name   = "snd-rpi-hifiberry-studio-dac8x",
+		.name   = "snd-rpi-hifiberry-studio",
 		.owner  = THIS_MODULE,
 		.of_match_table = snd_rpi_hifiberry_studio_of_match,
 	},
