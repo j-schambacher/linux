@@ -605,6 +605,7 @@ static const struct hb_uni_enum_control hb_uni_rec_enum_ctls[] = {
 	{ MUTE_INPUTS, 0, 0x01, mute_texts, ARRAY_SIZE(mute_texts) },
 };
 
+/* ---- Studio Digi / AES (card_type AES) controls ---- */
 static const struct hb_uni_enum_control hb_uni_dix_clk_enum_ctls[] = {
 	{ CARD_CLK_OVRWR, 0, 0x01, dix_clk_texts, ARRAY_SIZE(dix_clk_texts) },
 };
@@ -1004,59 +1005,86 @@ static int hb_uni_read_card_info(struct platform_device *pdev)
 	return 0;
 }
 
-static int hb_uni_add_card_controls(struct platform_device *pdev)
+/*
+ * Register the ALSA controls for an analog Studio DAC / ADC card (card_type
+ * DACADC): DAC filter + output mute, the output volumes (sized to the actual
+ * output-channel count), and — if inputs are present — the ADC gains and the
+ * clipping-attenuation control.
+ */
+static int hb_add_dacadc_controls(struct platform_device *pdev)
 {
 	int ret;
 
-	/* add controls if analog cards */
-	if (priv->card_type == DACADC) {
-		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-			hb_uni_gen_controls_single,
-			ARRAY_SIZE(hb_uni_gen_controls_single));
-		if (ret < 0) {
-			dev_err(&pdev->dev,
-				"snd_soc_add_card_controls() failed: %d\n", ret);
-			return ret;
-		}
-		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-				hb_uni_play_controls_single,
-				ARRAY_SIZE(hb_uni_play_controls_single) / 9 *
-						(priv->card_info.num_of_output_ch + 1));
-		if (ret < 0) {
-			dev_err(&pdev->dev,
-				"snd_soc_add_card_controls() failed: %d\n", ret);
-			return ret;
-		}
+	ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+		hb_uni_gen_controls_single,
+		ARRAY_SIZE(hb_uni_gen_controls_single));
+	if (ret < 0) {
+		dev_err(&pdev->dev,
+			"snd_soc_add_card_controls() failed: %d\n", ret);
+		return ret;
+	}
+	ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+			hb_uni_play_controls_single,
+			ARRAY_SIZE(hb_uni_play_controls_single) / 9 *
+					(priv->card_info.num_of_output_ch + 1));
+	if (ret < 0) {
+		dev_err(&pdev->dev,
+			"snd_soc_add_card_controls() failed: %d\n", ret);
+		return ret;
+	}
 
-		/* add optional ADC controls if inputs detected */
-		if (priv->card_info.num_of_input_ch > 0) {
-			ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-				hb_uni_rec_controls_single,
-				ARRAY_SIZE(hb_uni_rec_controls_single) / 8 *
-						priv->card_info.num_of_input_ch);
-			if (ret < 0) {
-				dev_err(&pdev->dev,
-					"snd_soc_add_card_controls() failed: %d\n", ret);
-			}
-			ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-				adc_controls_single,
-				ARRAY_SIZE(adc_controls_single));
-			if (ret < 0) {
-				dev_err(&pdev->dev,
-					"snd_soc_add_card_controls() failed: %d\n", ret);
-			}
-		}
-	/* add DIX controls if AES card detected */
-	} else if (priv->card_type == AES) {
+	/* add optional ADC controls if inputs detected */
+	if (priv->card_info.num_of_input_ch > 0) {
 		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
-			dix_controls_single,
-			ARRAY_SIZE(dix_controls_single));
+			hb_uni_rec_controls_single,
+			ARRAY_SIZE(hb_uni_rec_controls_single) / 8 *
+					priv->card_info.num_of_input_ch);
+		if (ret < 0) {
+			dev_err(&pdev->dev,
+				"snd_soc_add_card_controls() failed: %d\n", ret);
+		}
+		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+			adc_controls_single,
+			ARRAY_SIZE(adc_controls_single));
 		if (ret < 0) {
 			dev_err(&pdev->dev,
 				"snd_soc_add_card_controls() failed: %d\n", ret);
 		}
 	}
 	return ret;
+}
+
+/*
+ * Register the ALSA controls for a Studio Digi / AES card (card_type AES):
+ * the DIX controls — Clock mode, Current Sample Rate, Input/Output Mute.
+ */
+static int hb_add_dix_controls(struct platform_device *pdev)
+{
+	int ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio_dac8x,
+		dix_controls_single, ARRAY_SIZE(dix_controls_single));
+	if (ret < 0)
+		dev_err(&pdev->dev,
+			"snd_soc_add_card_controls() failed: %d\n", ret);
+	return ret;
+}
+
+/*
+ * The DAC8x and Digi cards share one controller and this driver; the card
+ * type is auto-detected from the controller UUID (hb_uni_read_card_info):
+ *   DACADC -> DAC8x DAC/ADC controls (hb_add_dacadc_controls)
+ *   AES    -> Digi DIX controls      (hb_add_dix_controls)
+ * Any other/unknown type registers no extra card controls.
+ */
+static int hb_uni_add_card_controls(struct platform_device *pdev)
+{
+	switch (priv->card_type) {
+	case DACADC:
+		return hb_add_dacadc_controls(pdev);
+	case AES:
+		return hb_add_dix_controls(pdev);
+	default:
+		return 0;
+	}
 }
 
 static int hb_controller_probe(struct platform_device *pdev)
@@ -1209,5 +1237,5 @@ static struct platform_driver snd_rpi_hifiberry_studio_dac8x_driver = {
 module_platform_driver(snd_rpi_hifiberry_studio_dac8x_driver);
 
 MODULE_AUTHOR("Joerg Schambacher <joerg@hifiberry.com>");
-MODULE_DESCRIPTION("HiFiBerry Studio Soundcard Driver");
+MODULE_DESCRIPTION("HiFiBerry Studio soundcard driver (DAC8x, Digi)");
 MODULE_LICENSE("GPL");
