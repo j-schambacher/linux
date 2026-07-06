@@ -904,64 +904,112 @@ static struct snd_soc_card snd_rpi_hifiberry_studio = {
 	.num_links    = ARRAY_SIZE(snd_rpi_hifiberry_studio_dai),
 };
 
-static int hb_studio_read_card_info(struct platform_device *pdev)
+/*
+ * Read the fixed hardware/firmware identity out of the controller: versions,
+ * UUID (-> card_type), channel counts, supported rates/formats and the
+ * CARD_BUSY.. capability block.  Purely a property of the controller itself,
+ * so this lives in the I2C controller driver and does not need anything from
+ * the machine driver's DT node (clk-provider, card-type) to complete.
+ */
+static int hb_studio_ctrl_read_info(struct i2c_client *client,
+				    struct hb_studio_private *p)
 {
 	u32 uuid_end;
 	int ret;
 
 	/* read basic card info */
-	ret = regmap_bulk_read(priv->regmap, 0x00, &priv->card_info, 0x06);
+	ret = regmap_bulk_read(p->regmap, 0x00, &p->card_info, 0x06);
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to read card info: %d\n", ret);
-	return ret;
-	}
-
-	dev_info(&pdev->dev, "hardware V%d.%d.%d\n",
-		 priv->card_info.hardware_major,
-		 priv->card_info.hardware_minor,
-		 priv->card_info.hardware_subversion);
-
-	dev_info(&pdev->dev, "firmware V%d.%d.%d\n",
-		 priv->card_info.firmware_major,
-		 priv->card_info.firmware_minor,
-		 priv->card_info.firmware_subversion);
-
-	/* read card capabilities */
-	ret = regmap_bulk_read(priv->regmap, UUID, &priv->card_info.uuid, 0x20);
-	if (ret) {
-		dev_err(&pdev->dev, "Failed to read card info: %d\n", ret);
+		dev_err(&client->dev, "Failed to read card info: %d\n", ret);
 		return ret;
 	}
 
-	dev_info(&pdev->dev, "UUID: %*phN\n",
-		 (int)sizeof(priv->card_info.uuid.b), priv->card_info.uuid.b);
-	dev_info(&pdev->dev, "%i output channels reported\n",
-		 priv->card_info.num_of_output_ch);
-	dev_dbg(&pdev->dev, "supported rates %08x\n",
-		priv->card_info.supported_rates);
-	dev_dbg(&pdev->dev, "supported formats %08x\n",
-		priv->card_info.supported_formats);
+	dev_info(&client->dev, "hardware V%d.%d.%d\n",
+		 p->card_info.hardware_major,
+		 p->card_info.hardware_minor,
+		 p->card_info.hardware_subversion);
 
-	if (priv->card_info.num_of_output_ch > 8 ||
-	    priv->card_info.num_of_input_ch > 8) {
-		dev_err(&pdev->dev, "Maximum of 8 channels exceeded!\n");
+	dev_info(&client->dev, "firmware V%d.%d.%d\n",
+		 p->card_info.firmware_major,
+		 p->card_info.firmware_minor,
+		 p->card_info.firmware_subversion);
+
+	/* read card capabilities */
+	ret = regmap_bulk_read(p->regmap, UUID, &p->card_info.uuid, 0x20);
+	if (ret) {
+		dev_err(&client->dev, "Failed to read card info: %d\n", ret);
+		return ret;
+	}
+
+	dev_info(&client->dev, "UUID: %*phN\n",
+		 (int)sizeof(p->card_info.uuid.b), p->card_info.uuid.b);
+	dev_info(&client->dev, "%i output channels reported\n",
+		 p->card_info.num_of_output_ch);
+	dev_dbg(&client->dev, "supported rates %08x\n",
+		p->card_info.supported_rates);
+	dev_dbg(&client->dev, "supported formats %08x\n",
+		p->card_info.supported_formats);
+
+	if (p->card_info.num_of_output_ch > 8 ||
+	    p->card_info.num_of_input_ch > 8) {
+		dev_err(&client->dev, "Maximum of 8 channels exceeded!\n");
 		return -EINVAL;
 	}
 
-	if (priv->card_info.num_of_input_ch > 0) {
-		dev_info(&pdev->dev,
+	if (p->card_info.num_of_input_ch > 0) {
+		dev_info(&client->dev,
 			 "Inputs detected: %u channels\n",
-			 priv->card_info.num_of_input_ch);
+			 p->card_info.num_of_input_ch);
 	} else {
-		dev_info(&pdev->dev, "No inputs present, playback only\n");
+		dev_info(&client->dev, "No inputs present, playback only\n");
 	}
 
-	ret = regmap_bulk_read(priv->regmap, CARD_BUSY,
-			       &priv->card_info.card_busy, 20);
+	ret = regmap_bulk_read(p->regmap, CARD_BUSY,
+			       &p->card_info.card_busy, 20);
 	if (ret) {
-		dev_err(&pdev->dev, "Failed to read card info: %d\n", ret);
+		dev_err(&client->dev, "Failed to read card info: %d\n", ret);
 		return ret;
 	}
+
+	uuid_end = cpu_to_be32(*(u32 *)((u8 *)&p->card_info.uuid + 12));
+	dev_info(&client->dev, "Card UUID end %08x\n", uuid_end);
+
+	switch (uuid_end) {
+	case 0x7c641980:
+		dev_info(&client->dev, "Card type Analog\n");
+		p->card_type = DACADC;
+		break;
+	case 0x0eb0104d:
+		dev_info(&client->dev, "Card type Digital/AES\n");
+		p->card_type = AES;
+		break;
+	default:
+		dev_info(&client->dev, "No card type detected, assuming Analog\n");
+		p->card_type = DACADC;
+		break;
+	}
+
+	regcache_cache_only(p->regmap, true);
+	ret = regmap_bulk_read(p->regmap, MASTER_VOL,
+			       &p->card_info.master_vol, MUTE_OUTPUTS - MASTER_VOL);
+	regcache_cache_only(p->regmap, false);
+
+	return 0;
+}
+
+/*
+ * Validate the controller's clock capability (CARD_CLK_OPTIONS, already read
+ * by hb_studio_ctrl_read_info()) against how *this* machine wires the card up
+ * (the "clk-provider" DT property lives on the sound node, not the I2C
+ * controller node), and pick up the informational "card-type" string.
+ */
+static int hb_studio_validate_clk_config(struct platform_device *pdev)
+{
+	struct device_node *np = pdev->dev.of_node;
+	int ret;
+
+	if (np && of_property_read_bool(np, "clk-provider"))
+		card_is_clk_provider = true;
 
 	if (card_is_clk_provider) {
 		if (priv->card_info.card_clk_options & 0x02) {
@@ -985,29 +1033,6 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 		dev_warn(&pdev->dev, "No card type specified, using default\n");
 	else
 		dev_info(&pdev->dev, "Card type %s\n", priv->type);
-
-	uuid_end = cpu_to_be32(*(u32 *)((u8 *)&priv->card_info.uuid + 12));
-	dev_info(&pdev->dev, "Card UUID end %08x\n", uuid_end);
-
-	switch (uuid_end) {
-	case 0x7c641980:
-		dev_info(&pdev->dev, "Card type Analog\n");
-		priv->card_type = DACADC;
-		break;
-	case 0x0eb0104d:
-		dev_info(&pdev->dev, "Card type Digital/AES\n");
-		priv->card_type = AES;
-		break;
-	default:
-		dev_info(&pdev->dev, "No card type detected, assuming Analog\n");
-		priv->card_type = DACADC;
-		break;
-	}
-
-	regcache_cache_only(priv->regmap, true);
-	ret = regmap_bulk_read(priv->regmap, MASTER_VOL,
-			       &priv->card_info.master_vol, MUTE_OUTPUTS - MASTER_VOL);
-	regcache_cache_only(priv->regmap, false);
 
 	return 0;
 }
@@ -1077,7 +1102,7 @@ static int hb_studio_add_dix_controls(struct platform_device *pdev)
 
 /*
  * The DAC8x and Digi cards share one controller and this driver; the card
- * type is auto-detected from the controller UUID (hb_studio_read_card_info):
+ * type is auto-detected from the controller UUID (hb_studio_ctrl_read_info):
  *   DACADC -> DAC8x DAC/ADC controls (hb_studio_add_dacadc_controls)
  *   AES    -> Digi DIX controls      (hb_studio_add_dix_controls)
  * Any other/unknown type registers no extra card controls.
@@ -1094,43 +1119,85 @@ static int hb_studio_add_card_controls(struct platform_device *pdev)
 	}
 }
 
-static int hb_studio_controller_probe(struct platform_device *pdev)
+/*
+ * I2C client driver for the onboard controller (hb-studio-ctrl @ 0x10).  It is
+ * instantiated from the "hifiberry,hb-studio-ctrl" child node under &i2c1 in
+ * the DT overlay (not created manually), so it binds like any other I2C
+ * device: address 0x10 shows up as "UU" in i2cdetect once this driver is
+ * loaded, instead of silently sitting on the bus unclaimed.
+ *
+ * Only one card is ever present in a system, so - matching the existing
+ * single-instance design of this file - the resulting private struct is
+ * published through the shared 'priv'/'hb_studio_i2c_client' statics for the
+ * machine driver to pick up, rather than through a per-device lookup.
+ */
+static int hb_studio_ctrl_probe(struct i2c_client *client)
 {
-	struct i2c_adapter *adap = i2c_get_adapter(1);
-	struct device_node *np = pdev->dev.of_node;
+	struct hb_studio_private *p;
 	int ret;
 
-	if (!adap)
-		return -EPROBE_DEFER;   /* I2C module not yet available */
-
-	struct i2c_board_info info = {
-		I2C_BOARD_INFO("hb-studio-ctrl", 0x10),
-	};
-
-	hb_studio_i2c_client = i2c_new_client_device(adap, &info);
-	if (IS_ERR(hb_studio_i2c_client))
-		return PTR_ERR(hb_studio_i2c_client);
-
-	priv = devm_kzalloc(&hb_studio_i2c_client->dev, sizeof(*priv), GFP_KERNEL);
-	if (!priv)
+	p = devm_kzalloc(&client->dev, sizeof(*p), GFP_KERNEL);
+	if (!p)
 		return -ENOMEM;
 
-	priv->regmap = devm_regmap_init_i2c(hb_studio_i2c_client, &hb_studio_regmap);
-	if (IS_ERR(priv->regmap))
-		return dev_err_probe(&hb_studio_i2c_client->dev,
-			PTR_ERR(priv->regmap), "Failed to init regmap\n");
+	p->regmap = devm_regmap_init_i2c(client, &hb_studio_regmap);
+	if (IS_ERR(p->regmap))
+		return dev_err_probe(&client->dev, PTR_ERR(p->regmap),
+				      "Failed to init regmap\n");
 
-	if (np && of_property_read_bool(np, "clk-provider"))
-		card_is_clk_provider = true;
+	i2c_set_clientdata(client, p);
 
-	ret = hb_studio_read_card_info(pdev);
-	if (ret < 0) {
-		dev_err(&hb_studio_i2c_client->dev,
+	/*
+	 * Read into the not-yet-published 'p' first. The machine driver polls
+	 * the shared 'priv' pointer and treats non-NULL as "fully ready", so
+	 * 'priv'/'hb_studio_i2c_client' must only be assigned once the read
+	 * below has actually succeeded - probing the two drivers can and does
+	 * happen concurrently, and publishing early let the machine driver
+	 * see a card_info that was still all zeroes.
+	 */
+	ret = hb_studio_ctrl_read_info(client, p);
+	if (ret) {
+		dev_err(&client->dev,
 			"Failed to read card info or wrong configuration!\n");
+		return ret;
 	}
 
-	return ret;
+	/* fully populated: now safe for the machine driver to consume */
+	priv = p;
+	hb_studio_i2c_client = client;
+
+	return 0;
 }
+
+static void hb_studio_ctrl_remove(struct i2c_client *client)
+{
+	if (hb_studio_i2c_client == client) {
+		priv = NULL;
+		hb_studio_i2c_client = NULL;
+	}
+}
+
+static const struct i2c_device_id hb_studio_ctrl_id[] = {
+	{ "hb-studio-ctrl", 0 },
+	{ }
+};
+MODULE_DEVICE_TABLE(i2c, hb_studio_ctrl_id);
+
+static const struct of_device_id hb_studio_ctrl_of_match[] = {
+	{ .compatible = "hifiberry,hb-studio-ctrl" },
+	{ }
+};
+MODULE_DEVICE_TABLE(of, hb_studio_ctrl_of_match);
+
+static struct i2c_driver hb_studio_ctrl_driver = {
+	.driver = {
+		.name           = "hb-studio-ctrl",
+		.of_match_table = hb_studio_ctrl_of_match,
+	},
+	.probe    = hb_studio_ctrl_probe,
+	.remove   = hb_studio_ctrl_remove,
+	.id_table = hb_studio_ctrl_id,
+};
 
 static void hb_studio_error_work(struct work_struct *work)
 {
@@ -1166,8 +1233,11 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 	int gpio, irq;
 	int ret = 0;
 
-	/* probe for controller */
-	ret = hb_studio_controller_probe(pdev);
+	/* wait for the I2C controller driver to have probed and populated priv */
+	if (!priv)
+		return -EPROBE_DEFER;
+
+	ret = hb_studio_validate_clk_config(pdev);
 	if (ret < 0)
 		return ret;
 
@@ -1226,6 +1296,7 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 
 static const struct of_device_id snd_rpi_hifiberry_studio_of_match[] = {
 	{ .compatible = "hifiberry,hifiberry-studio-dac8x", },
+	{ .compatible = "hifiberry,hifiberry-studio", },
 	{},
 };
 MODULE_DEVICE_TABLE(of, snd_rpi_hifiberry_studio_of_match);
@@ -1239,7 +1310,28 @@ static struct platform_driver snd_rpi_hifiberry_studio_driver = {
 	.probe  = snd_rpi_hifiberry_studio_probe,
 };
 
-module_platform_driver(snd_rpi_hifiberry_studio_driver);
+static int __init hb_studio_driver_init(void)
+{
+	int ret;
+
+	ret = i2c_add_driver(&hb_studio_ctrl_driver);
+	if (ret)
+		return ret;
+
+	ret = platform_driver_register(&snd_rpi_hifiberry_studio_driver);
+	if (ret)
+		i2c_del_driver(&hb_studio_ctrl_driver);
+
+	return ret;
+}
+module_init(hb_studio_driver_init);
+
+static void __exit hb_studio_driver_exit(void)
+{
+	platform_driver_unregister(&snd_rpi_hifiberry_studio_driver);
+	i2c_del_driver(&hb_studio_ctrl_driver);
+}
+module_exit(hb_studio_driver_exit);
 
 MODULE_AUTHOR("Joerg Schambacher <joerg@hifiberry.com>");
 MODULE_DESCRIPTION("HiFiBerry Studio soundcard driver (DAC8x, Digi)");
