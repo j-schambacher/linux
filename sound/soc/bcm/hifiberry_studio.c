@@ -89,7 +89,6 @@
 #define VOL_CH6				0x57
 #define VOL_CH7				0x58
 #define MUTE_OUTPUTS			0x59
-#define ADC_INPUT_MODE			0x70
 #define ADC_STATE			0x70
 #define ADC_CLOCK_SOURCE		0x71
 #define ADC_SYS_CLK			0x72
@@ -194,7 +193,6 @@ struct hb_studio_regs_t {
 	unsigned char vol_ch7;			// 0x58
 	unsigned char mute_outputs;		// 0x59
 	unsigned char res5[22];			// 0x5a- 0x6f
-	unsigned char adc_input_mode;		// 0x70
 	unsigned char adc_state;		// 0x70
 	unsigned char adc_clock_source;		// 0x71
 	unsigned char adc_sys_clk;		// 0x72
@@ -217,7 +215,6 @@ struct hb_studio_regs_t {
 	unsigned char mute_inputs;		// 0x89
 	};
 
-
 static struct snd_soc_card snd_rpi_hifiberry_studio;
 static struct i2c_client *hb_studio_i2c_client;
 struct hb_studio_private {
@@ -232,7 +229,7 @@ struct hb_studio_private {
 	struct snd_pcm_substream *capture_substream;
 	spinlock_t stream_lock;
 	struct work_struct error_work;
-	const char * type;
+	const char *type;
 	int card_type;
 };
 
@@ -356,16 +353,15 @@ struct hb_studio_vol_control_single {
 	const unsigned int *tlv;
 };
 
-/* Add this to the enum control definitions */
 static const char * const samplerate_texts[] = {
-    "5512Hz", "8kHz", "11.025kHz", "16kHz",
-    "22.050kHz", "32kHz", "44.1kHz", "48kHz", "64kHz",
-    "88.2kHz", "96kHz", "176.4kHz", "192kHz", "352.8kHz", "384kHz",
-    "na"
+	"5512Hz", "8kHz", "11.025kHz", "16kHz",
+	"22.050kHz", "32kHz", "44.1kHz", "48kHz", "64kHz",
+	"88.2kHz", "96kHz", "176.4kHz", "192kHz", "352.8kHz", "384kHz",
+	"na"
 };
 
 static int hb_studio_vol_info_single(struct snd_kcontrol *kcontrol,
-			  struct snd_ctl_elem_info *uinfo)
+				     struct snd_ctl_elem_info *uinfo)
 {
 	struct hb_studio_vol_control_single *ctl = (void *)kcontrol->private_value;
 
@@ -378,7 +374,7 @@ static int hb_studio_vol_info_single(struct snd_kcontrol *kcontrol,
 }
 
 static int hb_studio_vol_get_single(struct snd_kcontrol *kcontrol,
-			 struct snd_ctl_elem_value *ucontrol)
+				    struct snd_ctl_elem_value *ucontrol)
 {
 	struct hb_studio_vol_control_single *ctl = (void *)kcontrol->private_value;
 	unsigned int val;
@@ -392,7 +388,7 @@ static int hb_studio_vol_get_single(struct snd_kcontrol *kcontrol,
 }
 
 static int hb_studio_vol_put_single(struct snd_kcontrol *kcontrol,
-			 struct snd_ctl_elem_value *ucontrol)
+				    struct snd_ctl_elem_value *ucontrol)
 {
 	struct hb_studio_vol_control_single *ctl = (void *)kcontrol->private_value;
 	unsigned int val = ucontrol->value.integer.value[0];
@@ -414,7 +410,7 @@ struct hb_studio_enum_control {
 };
 
 static int hb_studio_enum_info(struct snd_kcontrol *kcontrol,
-			    struct snd_ctl_elem_info *uinfo)
+			       struct snd_ctl_elem_info *uinfo)
 {
 	struct hb_studio_enum_control *ctl = (void *)kcontrol->private_value;
 
@@ -433,7 +429,7 @@ static int hb_studio_enum_info(struct snd_kcontrol *kcontrol,
 }
 
 static int hb_studio_enum_get(struct snd_kcontrol *kcontrol,
-			   struct snd_ctl_elem_value *ucontrol)
+			      struct snd_ctl_elem_value *ucontrol)
 {
 	struct hb_studio_enum_control *ctl = (void *)kcontrol->private_value;
 	unsigned int val;
@@ -450,7 +446,7 @@ static int hb_studio_enum_get(struct snd_kcontrol *kcontrol,
 }
 
 static int hb_studio_enum_put(struct snd_kcontrol *kcontrol,
-			   struct snd_ctl_elem_value *ucontrol)
+			      struct snd_ctl_elem_value *ucontrol)
 {
 	struct hb_studio_enum_control *ctl = (void *)kcontrol->private_value;
 	unsigned int val = ucontrol->value.enumerated.item[0];
@@ -494,19 +490,33 @@ static int hb_studio_input_rate_hz(struct hb_studio_private *p)
 }
 
 static int hb_studio_samplerate_get(struct snd_kcontrol *kcontrol,
-				 struct snd_ctl_elem_value *ucontrol)
+				    struct snd_ctl_elem_value *ucontrol)
 {
 	struct hb_studio_enum_control *ctl = (void *)kcontrol->private_value;
 	unsigned int idx;
 
 	switch (hb_studio_input_rate_hz(priv)) {
-	case 44100:  idx = 6;  break;
-	case 48000:  idx = 7;  break;
-	case 88200:  idx = 9;  break;
-	case 96000:  idx = 10; break;
-	case 176400: idx = 11; break;
-	case 192000: idx = 12; break;
-	default:     idx = ctl->items - 1; break;	/* na */
+	case 44100:
+		idx = 6;
+		break;
+	case 48000:
+		idx = 7;
+		break;
+	case 88200:
+		idx = 9;
+		break;
+	case 96000:
+		idx = 10;
+		break;
+	case 176400:
+		idx = 11;
+		break;
+	case 192000:
+		idx = 12;
+		break;
+	default:
+		idx = ctl->items - 1;	/* na */
+		break;
 	}
 
 	ucontrol->value.enumerated.item[0] = idx;
@@ -620,11 +630,12 @@ static const struct snd_kcontrol_new adc_controls_single[] = {
 };
 
 static const struct hb_studio_enum_control hb_studio_samplerate_ctl = {
-    .reg = CARD_DIR_FS,   // DIR FS calculator (0x3A): real input rate, any clock mode
-    .shift = 0,
-    .mask = 0x0F,         // Rate is stored in lower 4 bits
-    .texts = samplerate_texts,
-    .items = ARRAY_SIZE(samplerate_texts),
+	/* DIR FS calculator (0x3A): real input rate, any clock mode */
+	.reg = CARD_DIR_FS,
+	.shift = 0,
+	.mask = 0x0F,		/* rate is stored in lower 4 bits */
+	.texts = samplerate_texts,
+	.items = ARRAY_SIZE(samplerate_texts),
 };
 
 static const struct snd_kcontrol_new dix_controls_single[] = {
@@ -651,7 +662,7 @@ static int snd_rpi_hifiberry_studio_hw_params(
 	priv->current_rate = params_rate(params);
 
 	dev_info(dev, "requesting %ibits @ %isps\n",
-		priv->sample_bits, priv->current_rate);
+		 priv->sample_bits, priv->current_rate);
 
 	/* write requested samplerate and word length back to card */
 	switch (priv->current_rate) {
@@ -758,7 +769,7 @@ static int snd_rpi_hifiberry_studio_hw_params(
 		break;
 	default:
 		dev_info(dev, "word length not supported (%u)\n",
-		priv->sample_bits);
+			 priv->sample_bits);
 		return -EINVAL;
 	}
 	err = regmap_write(priv->regmap, CURRENT_FORMAT, tmp);
@@ -784,6 +795,7 @@ static int snd_rpi_hifiberry_studio_hw_params(
 	/* always run with 64bit frames */
 	return snd_soc_dai_set_bclk_ratio(cpu_dai, 64);
 }
+
 static int snd_rpi_hifiberry_studio_startup(
 	struct snd_pcm_substream *substream)
 {
@@ -827,7 +839,6 @@ SND_SOC_DAILINK_DEFS(hifiberry_studio,
 
 static void hb_studio_error_work(struct work_struct *work);
 
-
 static int hifiberry_studio_init(struct snd_soc_pcm_runtime *rtd)
 {
 	struct snd_soc_dai *codec_dai = snd_soc_rtd_to_codec(rtd, 0);
@@ -851,7 +862,6 @@ static int hifiberry_studio_init(struct snd_soc_pcm_runtime *rtd)
 			priv->card_info.supported_rates;
 		codec_dai->driver->capture.channels_max =
 			priv->card_info.num_of_input_ch;
-//		dai->name = "HiFiBerry Studio DAC8x-ADC8x";
 		dai->stream_name = "HiFiBerry Studio HiFi";
 	} else {
 		rtd->dai_link->playback_only = 1;  // Disable capture
@@ -896,6 +906,7 @@ static struct snd_soc_card snd_rpi_hifiberry_studio = {
 
 static int hb_studio_read_card_info(struct platform_device *pdev)
 {
+	u32 uuid_end;
 	int ret;
 
 	/* read basic card info */
@@ -906,16 +917,14 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 	}
 
 	dev_info(&pdev->dev, "hardware V%d.%d.%d\n",
-		priv->card_info.hardware_major,
-		priv->card_info.hardware_minor,
-		priv->card_info.hardware_subversion
-		);
+		 priv->card_info.hardware_major,
+		 priv->card_info.hardware_minor,
+		 priv->card_info.hardware_subversion);
 
 	dev_info(&pdev->dev, "firmware V%d.%d.%d\n",
-		priv->card_info.firmware_major,
-		priv->card_info.firmware_minor,
-		priv->card_info.firmware_subversion
-		);
+		 priv->card_info.firmware_major,
+		 priv->card_info.firmware_minor,
+		 priv->card_info.firmware_subversion);
 
 	/* read card capabilities */
 	ret = regmap_bulk_read(priv->regmap, UUID, &priv->card_info.uuid, 0x20);
@@ -925,13 +934,13 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 	}
 
 	dev_info(&pdev->dev, "UUID: %*phN\n",
-		(int)sizeof(priv->card_info.uuid.b), priv->card_info.uuid.b);
+		 (int)sizeof(priv->card_info.uuid.b), priv->card_info.uuid.b);
 	dev_info(&pdev->dev, "%i output channels reported\n",
-				priv->card_info.num_of_output_ch);
+		 priv->card_info.num_of_output_ch);
 	dev_dbg(&pdev->dev, "supported rates %08x\n",
-				priv->card_info.supported_rates);
+		priv->card_info.supported_rates);
 	dev_dbg(&pdev->dev, "supported formats %08x\n",
-				priv->card_info.supported_formats);
+		priv->card_info.supported_formats);
 
 	if (priv->card_info.num_of_output_ch > 8 ||
 	    priv->card_info.num_of_input_ch > 8) {
@@ -941,14 +950,14 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 
 	if (priv->card_info.num_of_input_ch > 0) {
 		dev_info(&pdev->dev,
-			"Inputs detected: %u channels\n",
-			priv->card_info.num_of_input_ch);
+			 "Inputs detected: %u channels\n",
+			 priv->card_info.num_of_input_ch);
 	} else {
 		dev_info(&pdev->dev, "No inputs present, playback only\n");
 	}
 
 	ret = regmap_bulk_read(priv->regmap, CARD_BUSY,
-				&priv->card_info.card_busy, 20);
+			       &priv->card_info.card_busy, 20);
 	if (ret) {
 		dev_err(&pdev->dev, "Failed to read card info: %d\n", ret);
 		return ret;
@@ -963,7 +972,7 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 			return -EINVAL;
 		}
 	} else {
-		if ((priv->card_info.card_clk_options == 0x02)) {
+		if (priv->card_info.card_clk_options == 0x02) {
 			dev_err(&pdev->dev,
 				"Card cannot run as i2s clock consumer\n");
 			return -EINVAL;
@@ -971,17 +980,16 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 	}
 
 	ret = of_property_read_string(pdev->dev.of_node,
-			      "card-type", &priv->type);
+				      "card-type", &priv->type);
 	if (ret)
 		dev_warn(&pdev->dev, "No card type specified, using default\n");
 	else
 		dev_info(&pdev->dev, "Card type %s\n", priv->type);
 
-#define _uuid_ 	cpu_to_be32(*(unsigned int *)((uint8_t *)&priv->card_info.uuid + 12))
+	uuid_end = cpu_to_be32(*(u32 *)((u8 *)&priv->card_info.uuid + 12));
+	dev_info(&pdev->dev, "Card UUID end %08x\n", uuid_end);
 
-	dev_info(&pdev->dev, "Card UUID end %x08\n", _uuid_);
-
-	switch (_uuid_) {
+	switch (uuid_end) {
 	case 0x7c641980:
 		dev_info(&pdev->dev, "Card type Analog\n");
 		priv->card_type = DACADC;
@@ -991,15 +999,14 @@ static int hb_studio_read_card_info(struct platform_device *pdev)
 		priv->card_type = AES;
 		break;
 	default:
-		dev_info(&pdev->dev, "No card type detected, assuming Analog \n");
+		dev_info(&pdev->dev, "No card type detected, assuming Analog\n");
 		priv->card_type = DACADC;
 		break;
 	}
 
-
 	regcache_cache_only(priv->regmap, true);
 	ret = regmap_bulk_read(priv->regmap, MASTER_VOL,
-			&priv->card_info.master_vol, MUTE_OUTPUTS - MASTER_VOL);
+			       &priv->card_info.master_vol, MUTE_OUTPUTS - MASTER_VOL);
 	regcache_cache_only(priv->regmap, false);
 
 	return 0;
@@ -1016,16 +1023,16 @@ static int hb_studio_add_dacadc_controls(struct platform_device *pdev)
 	int ret;
 
 	ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio,
-		hb_studio_gen_controls_single,
-		ARRAY_SIZE(hb_studio_gen_controls_single));
+					hb_studio_gen_controls_single,
+					ARRAY_SIZE(hb_studio_gen_controls_single));
 	if (ret < 0) {
 		dev_err(&pdev->dev,
 			"snd_soc_add_card_controls() failed: %d\n", ret);
 		return ret;
 	}
 	ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio,
-			hb_studio_play_controls_single,
-			ARRAY_SIZE(hb_studio_play_controls_single) / 9 *
+					hb_studio_play_controls_single,
+					ARRAY_SIZE(hb_studio_play_controls_single) / 9 *
 					(priv->card_info.num_of_output_ch + 1));
 	if (ret < 0) {
 		dev_err(&pdev->dev,
@@ -1036,16 +1043,16 @@ static int hb_studio_add_dacadc_controls(struct platform_device *pdev)
 	/* add optional ADC controls if inputs detected */
 	if (priv->card_info.num_of_input_ch > 0) {
 		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio,
-			hb_studio_rec_controls_single,
-			ARRAY_SIZE(hb_studio_rec_controls_single) / 8 *
-					priv->card_info.num_of_input_ch);
+						hb_studio_rec_controls_single,
+						ARRAY_SIZE(hb_studio_rec_controls_single) / 8 *
+						priv->card_info.num_of_input_ch);
 		if (ret < 0) {
 			dev_err(&pdev->dev,
 				"snd_soc_add_card_controls() failed: %d\n", ret);
 		}
 		ret = snd_soc_add_card_controls(&snd_rpi_hifiberry_studio,
-			adc_controls_single,
-			ARRAY_SIZE(adc_controls_single));
+						adc_controls_single,
+						ARRAY_SIZE(adc_controls_single));
 		if (ret < 0) {
 			dev_err(&pdev->dev,
 				"snd_soc_add_card_controls() failed: %d\n", ret);
@@ -1164,7 +1171,7 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	dev_info(&pdev->dev, "GPIO checking .. \n");
+	dev_info(&pdev->dev, "GPIO checking ..\n");
 	gpio = of_get_named_gpio(pdev->dev.of_node, "gpios", 0);
 	if (!gpio_is_valid(gpio))
 		return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
@@ -1178,12 +1185,11 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 		return irq;
 
 	ret = devm_request_threaded_irq(&pdev->dev, irq,
-				    hb_studio_irq_handler, NULL,
-				    IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
-				    "hifiberry-studio-fs-change", priv);
+					hb_studio_irq_handler, NULL,
+					IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+					"hifiberry-studio-fs-change", priv);
 	if (ret)
 		return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
-
 
 	dev_info(&pdev->dev, "GPIO interrupt registered on GPIO %d (IRQ %d)\n",
 		 gpio, irq);
@@ -1196,7 +1202,7 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 
 		dai = &snd_rpi_hifiberry_studio_dai[0];
 		i2s_node = of_parse_phandle(pdev->dev.of_node,
-			"i2s-controller", 0);
+					    "i2s-controller", 0);
 
 		if (i2s_node) {
 			dai->cpus->dai_name = NULL;
@@ -1207,7 +1213,7 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 	}
 
 	ret = devm_snd_soc_register_card(&pdev->dev,
-			&snd_rpi_hifiberry_studio);
+					 &snd_rpi_hifiberry_studio);
 	if (ret && ret != -EPROBE_DEFER)
 		dev_err(&pdev->dev,
 			"devm_snd_soc_register_card() failed: %d\n", ret);
