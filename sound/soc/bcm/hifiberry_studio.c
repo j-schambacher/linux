@@ -989,11 +989,6 @@ static int hb_studio_ctrl_read_info(struct i2c_client *client,
 		break;
 	}
 
-	regcache_cache_only(p->regmap, true);
-	ret = regmap_bulk_read(p->regmap, MASTER_VOL,
-			       &p->card_info.master_vol, MUTE_OUTPUTS - MASTER_VOL);
-	regcache_cache_only(p->regmap, false);
-
 	return 0;
 }
 
@@ -1191,8 +1186,9 @@ MODULE_DEVICE_TABLE(of, hb_studio_ctrl_of_match);
 
 static struct i2c_driver hb_studio_ctrl_driver = {
 	.driver = {
-		.name           = "hb-studio-ctrl",
-		.of_match_table = hb_studio_ctrl_of_match,
+		.name                = "hb-studio-ctrl",
+		.of_match_table      = hb_studio_ctrl_of_match,
+		.suppress_bind_attrs = true,
 	},
 	.probe    = hb_studio_ctrl_probe,
 	.remove   = hb_studio_ctrl_remove,
@@ -1284,9 +1280,12 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 
 	ret = devm_snd_soc_register_card(&pdev->dev,
 					 &snd_rpi_hifiberry_studio);
-	if (ret && ret != -EPROBE_DEFER)
-		dev_err(&pdev->dev,
-			"devm_snd_soc_register_card() failed: %d\n", ret);
+	if (ret) {
+		if (ret != -EPROBE_DEFER)
+			dev_err(&pdev->dev,
+				"devm_snd_soc_register_card() failed: %d\n", ret);
+		return ret;
+	}
 
 	/* as we do not have components use card-controls */
 	ret = hb_studio_add_card_controls(pdev);
