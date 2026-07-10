@@ -1226,6 +1226,7 @@ static irqreturn_t hb_studio_irq_handler(int irq, void *dev_id)
 
 static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 {
+	bool no_controls;
 	int gpio, irq;
 	int ret = 0;
 
@@ -1237,28 +1238,38 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 	if (ret < 0)
 		return ret;
 
-	dev_info(&pdev->dev, "GPIO checking ..\n");
-	gpio = of_get_named_gpio(pdev->dev.of_node, "gpios", 0);
-	if (!gpio_is_valid(gpio))
-		return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
+	no_controls = of_property_read_bool(pdev->dev.of_node, "no-controls");
 
-	ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "hifiberry-studio-fs-change");
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to request GPIO\n");
+	/*
+	 * The FS-change / PLL-lost interrupt only exists on the Digi/AES
+	 * board's overlay (gpios/interrupts wired to GPIO7); the DAC8x
+	 * overlays don't route it at all, and there's nothing for a purely
+	 * analog card to report here, so only look for it for AES cards.
+	 */
+	if (priv->card_type == AES) {
+		dev_info(&pdev->dev, "GPIO checking ..\n");
+		gpio = of_get_named_gpio(pdev->dev.of_node, "gpios", 0);
+		if (!gpio_is_valid(gpio))
+			return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
 
-	irq = gpio_to_irq(gpio);
-	if (irq < 0)
-		return irq;
+		ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "hifiberry-studio-fs-change");
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret, "Failed to request GPIO\n");
 
-	ret = devm_request_threaded_irq(&pdev->dev, irq,
-					hb_studio_irq_handler, NULL,
-					IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
-					"hifiberry-studio-fs-change", priv);
-	if (ret)
-		return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
+		irq = gpio_to_irq(gpio);
+		if (irq < 0)
+			return irq;
 
-	dev_info(&pdev->dev, "GPIO interrupt registered on GPIO %d (IRQ %d)\n",
-		 gpio, irq);
+		ret = devm_request_threaded_irq(&pdev->dev, irq,
+						hb_studio_irq_handler, NULL,
+						IRQF_TRIGGER_RISING | IRQF_TRIGGER_FALLING,
+						"hifiberry-studio-fs-change", priv);
+		if (ret)
+			return dev_err_probe(&pdev->dev, ret, "Failed to request IRQ\n");
+
+		dev_info(&pdev->dev, "GPIO interrupt registered on GPIO %d (IRQ %d)\n",
+			 gpio, irq);
+	}
 
 	snd_rpi_hifiberry_studio.dev = &pdev->dev;
 
@@ -1285,6 +1296,11 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 			dev_err(&pdev->dev,
 				"devm_snd_soc_register_card() failed: %d\n", ret);
 		return ret;
+	}
+
+	if (no_controls) {
+		dev_info(&pdev->dev, "ALSA controls disabled (no-controls)\n");
+		return 0;
 	}
 
 	/* as we do not have components use card-controls */
