@@ -1252,7 +1252,8 @@ static int snd_rpi_hifiberry_studio_probe(struct platform_device *pdev)
 		if (!gpio_is_valid(gpio))
 			return dev_err_probe(&pdev->dev, gpio, "Invalid GPIO\n");
 
-		ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN, "hifiberry-studio-fs-change");
+		ret = devm_gpio_request_one(&pdev->dev, gpio, GPIOF_IN,
+					    "hifiberry-studio-fs-change");
 		if (ret)
 			return dev_err_probe(&pdev->dev, ret, "Failed to request GPIO\n");
 
